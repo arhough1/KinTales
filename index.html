@@ -198,8 +198,14 @@
                         if (charsResponse.error) throw charsResponse.error;
                         if (storiesResponse.error) throw storiesResponse.error;
 
+                        const localAgesStr = localStorage.getItem(`kintales_hero_ages_${session.user.id}`) || '{}';
+                        const localAges = JSON.parse(localAgesStr);
+                        const localQuirksStr = localStorage.getItem(`kintales_hero_quirks_${session.user.id}`) || '{}';
+                        const localQuirks = JSON.parse(localQuirksStr);
                         const mappedChars = charsResponse.data.map(c => ({
                             ...c,
+                            age: c.age || localAges[c.id] || '',
+                            quirk: c.quirk || localQuirks[c.id] || '',
                             image: c.emoji_icon || '✨',
                             images: c.image_paths || []
                         }));
@@ -272,6 +278,8 @@
             const [editingHeroId, setEditingHeroId] = useState(null);
             const [newHeroName, setNewHeroName] = useState('');
             const [newHeroRole, setNewHeroRole] = useState('');
+            const [newHeroAge, setNewHeroAge] = useState('');
+            const [newHeroQuirk, setNewHeroQuirk] = useState('');
             const [uploadedImages, setUploadedImages] = useState([]);
             const [isAnalyzingImage, setIsAnalyzingImage] = useState(false);
             const [archetypeMode, setArchetypeMode] = useState('standard'); // 'standard' or 'vision'
@@ -281,6 +289,8 @@
                 setEditingHeroId(hero.id);
                 setNewHeroName(hero.name);
                 setNewHeroRole(hero.role);
+                setNewHeroAge(hero.age || '');
+                setNewHeroQuirk(hero.quirk || '');
                 setUploadedImages(hero.images || []); // Load existing images
                 setArchetypeMode((hero.images && hero.images.length > 0) ? 'vision' : 'standard');
                 setHeroTab('training');
@@ -361,7 +371,7 @@
             };
 
             const handleSaveHero = async () => {
-                if (!newHeroName || !session?.user) return;
+                if (!newHeroName || !newHeroAge || !session?.user) return;
                 setIsGenerating(true);
 
                 try {
@@ -371,26 +381,87 @@
                         role: newHeroRole || 'The Mysterious Wanderer',
                         type: 'child',
                         emoji_icon: uploadedImages.length > 0 ? '✨' : '🌟',
-                        image_paths: uploadedImages
+                        image_paths: uploadedImages,
+                        age: newHeroAge || '',
+                        quirk: newHeroQuirk || ''
+                    };
+
+                    let data, error;
+                    try {
+                        if (editingHeroId) {
+                            const res = await supabase.from('characters').update(heroData).eq('id', editingHeroId).select().single();
+                            data = res.data;
+                            error = res.error;
+                        } else {
+                            const res = await supabase.from('characters').insert(heroData).select().single();
+                            data = res.data;
+                            error = res.error;
+                        }
+                        if (error) throw error;
+                    } catch (supabaseErr) {
+                        const isMissingColumn = supabaseErr.message?.includes('age') || supabaseErr.message?.includes('quirk') || supabaseErr.code === '42703';
+                        if (isMissingColumn) {
+                            console.warn("Supabase characters table missing columns. Falling back to LocalStorage.");
+                            const { age, quirk, ...strippedHeroData } = heroData;
+                            if (editingHeroId) {
+                                const res = await supabase.from('characters').update(strippedHeroData).eq('id', editingHeroId).select().single();
+                                data = res.data;
+                                error = res.error;
+                            } else {
+                                const res = await supabase.from('characters').insert(strippedHeroData).select().single();
+                                data = res.data;
+                                error = res.error;
+                            }
+                            if (error) throw error;
+
+                            // Save age and quirk to LocalStorage fallback
+                            const localAgesStr = localStorage.getItem(`kintales_hero_ages_${session.user.id}`) || '{}';
+                            const localAges = JSON.parse(localAgesStr);
+                            localAges[data.id] = newHeroAge;
+                            localStorage.setItem(`kintales_hero_ages_${session.user.id}`, JSON.stringify(localAges));
+
+                            const localQuirksStr = localStorage.getItem(`kintales_hero_quirks_${session.user.id}`) || '{}';
+                            const localQuirks = JSON.parse(localQuirksStr);
+                            localQuirks[data.id] = newHeroQuirk;
+                            localStorage.setItem(`kintales_hero_quirks_${session.user.id}`, JSON.stringify(localQuirks));
+
+                            data.age = newHeroAge;
+                            data.quirk = newHeroQuirk;
+                        } else {
+                            throw supabaseErr;
+                        }
+                    }
+
+                    // Save age and quirk to LocalStorage for offline persistence / consistent cache state
+                    const localAgesStr = localStorage.getItem(`kintales_hero_ages_${session.user.id}`) || '{}';
+                    const localAges = JSON.parse(localAgesStr);
+                    localAges[data.id] = newHeroAge;
+                    localStorage.setItem(`kintales_hero_ages_${session.user.id}`, JSON.stringify(localAges));
+
+                    const localQuirksStr = localStorage.getItem(`kintales_hero_quirks_${session.user.id}`) || '{}';
+                    const localQuirks = JSON.parse(localQuirksStr);
+                    localQuirks[data.id] = newHeroQuirk;
+                    localStorage.setItem(`kintales_hero_quirks_${session.user.id}`, JSON.stringify(localQuirks));
+
+                    const mappedSavedHero = {
+                        ...data,
+                        age: newHeroAge,
+                        quirk: newHeroQuirk,
+                        image: data.emoji_icon || '✨',
+                        images: data.image_paths || []
                     };
 
                     if (editingHeroId) {
-                        // Update existing
-                        const { data, error } = await supabase.from('characters').update(heroData).eq('id', editingHeroId).select().single();
-                        if (error) throw error;
-
-                        setCharacters(characters.map(c => c.id === editingHeroId ? { ...data, image: data.emoji_icon, images: data.image_paths } : c));
+                        setCharacters(characters.map(c => c.id === editingHeroId ? mappedSavedHero : c));
                     } else {
-                        // Create new
-                        const { data, error } = await supabase.from('characters').insert(heroData).select().single();
-                        if (error) throw error;
-
-                        setCharacters([{ ...data, image: data.emoji_icon, images: data.image_paths }, ...characters]);
+                        setCharacters([mappedSavedHero, ...characters]);
                     }
 
                     setEditingHeroId(null);
                     setNewHeroName('');
                     setNewHeroRole('');
+                    setNewHeroAge('');
+                    setNewHeroQuirk('');
                     setUploadedImages([]);
                     setArchetypeMode('standard');
                     setHeroTab('gallery');
@@ -406,6 +477,8 @@
                 setEditingHeroId(null);
                 setNewHeroName('');
                 setNewHeroRole('');
+                setNewHeroAge('');
+                setNewHeroQuirk('');
                 setUploadedImages([]);
                 setHeroTab('gallery');
             };
@@ -905,8 +978,20 @@
                                         </div>
                                     </div>
                                     <div className="p-4">
-                                        <h3 className="font-bold text-lg">{c.name}</h3>
+                                        <div className="flex justify-between items-center">
+                                            <h3 className="font-bold text-lg">{c.name}</h3>
+                                            {c.age && (
+                                                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${isNightMode ? 'bg-slate-700 text-cyan-400 border border-cyan-500/20' : 'bg-rose-50 text-rose-500 border border-rose-200'}`}>
+                                                    Age {c.age}
+                                                </span>
+                                            )}
+                                        </div>
                                         <p className={`text-xs mt-1 ${theme.accentText}`}>{c.role}</p>
+                                        {c.quirk && (
+                                            <p className={`text-[11px] mt-1.5 italic line-clamp-2 ${theme.textMuted}`} title={c.quirk}>
+                                                "{c.quirk}"
+                                            </p>
+                                        )}
                                     </div>
                                 </div>
                             ))}
@@ -994,6 +1079,14 @@
                                             />
                                         </div>
                                         <div>
+                                            <label className={`text-xs font-bold uppercase tracking-wider ${theme.textMuted}`}>Age * (Helps us craft age-appropriate stories)</label>
+                                            <input type="number" min="0" value={newHeroAge} onChange={(e) => setNewHeroAge(e.target.value)}
+                                                placeholder="e.g. 10"
+                                                className={`w-full mt-1 p-3 rounded-lg border bg-transparent focus:outline-none focus:ring-2
+                        focus:ring-cyan-500 ${isNightMode ? 'border-slate-700' : 'border-amber-200'}`}
+                                            />
+                                        </div>
+                                        <div>
                                             <div className="flex justify-between items-end mb-1">
                                                 <label className={`text-xs font-bold uppercase tracking-wider ${theme.textMuted}`}>Suggested
                                                     Archetype</label>
@@ -1042,7 +1135,8 @@
                                         <div>
                                             <label className={`text-xs font-bold uppercase tracking-wider ${theme.textMuted}`}>Manual Quirk
                                                 (Optional)</label>
-                                            <textarea placeholder="e.g. Always wears a backwards red hat..." className={`w-full mt-1 p-3
+                                            <textarea value={newHeroQuirk} onChange={(e) => setNewHeroQuirk(e.target.value)}
+                                                placeholder="e.g. Always wears a backwards red hat..." className={`w-full mt-1 p-3
                             rounded-lg border bg-transparent focus:outline-none focus:ring-2 focus:ring-cyan-500
                             min-h-[100px] ${isNightMode ? 'border-slate-700' : 'border-amber-200'}`}></textarea>
                                         </div>
@@ -1055,7 +1149,7 @@
                                                     Cancel
                                                 </button>
                                             )}
-                                            <button onClick={handleSaveHero} disabled={!newHeroName} className={`flex-[2] py-3 rounded-lg
+                                            <button onClick={handleSaveHero} disabled={!newHeroName || !newHeroAge} className={`flex-[2] py-3 rounded-lg
                             font-bold transition-all disabled:opacity-50 ${theme.accent}`}>
                                                 {editingHeroId ? 'Update Hero' : 'Save Hero'}
                                             </button>
