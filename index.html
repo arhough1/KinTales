@@ -161,6 +161,7 @@
             const [heroTab, setHeroTab] = useState('gallery'); // gallery, training
             const [selectedHero, setSelectedHero] = useState(null);
             const [selectedTheme, setSelectedTheme] = useState(null);
+            const [selectedTrackId, setSelectedTrackId] = useState('');
 
             // Themes
             const themes = [
@@ -176,6 +177,13 @@
             const [isGenerating, setIsGenerating] = useState(false);
             const [isLoadingData, setIsLoadingData] = useState(false);
             const [isUploading, setIsUploading] = useState(false);
+
+            // Adventure Tracks State
+            const [tracks, setTracks] = useState([]);
+            const [isCreatingTrack, setIsCreatingTrack] = useState(false);
+            const [newTrackName, setNewTrackName] = useState('');
+            const [newTrackHeroId, setNewTrackHeroId] = useState('');
+            const [newTrackThemeId, setNewTrackThemeId] = useState('');
 
             useEffect(() => {
                 if (!session?.user) return;
@@ -208,6 +216,49 @@
 
                         setCharacters(mappedChars);
                         setStories(mappedStories);
+
+                        // Try to load adventure_tracks from Supabase with LocalStorage fallback
+                        try {
+                            const { data: tracksData, error: tracksError } = await supabase
+                                .from('adventure_tracks')
+                                .select('*')
+                                .order('created_at', { ascending: false });
+                            
+                            if (tracksError) throw tracksError;
+                            setTracks(tracksData || []);
+                        } catch (tracksErr) {
+                            console.warn("Supabase adventure_tracks failed to load (falling back to LocalStorage):", tracksErr);
+                            const localTracksStr = localStorage.getItem(`kintales_tracks_${session.user.id}`);
+                            if (localTracksStr) {
+                                setTracks(JSON.parse(localTracksStr));
+                            } else {
+                                // Populate with initial defaults matching loaded characters if possible
+                                const initialTracks = [
+                                    {
+                                        id: 'default-maya',
+                                        name: "Maya's Missions",
+                                        character_id: mappedChars.find(c => c.name.toLowerCase() === 'maya')?.id || 'default-char-maya',
+                                        theme_id: 'fairy',
+                                        isDefault: true,
+                                        mockCount: 3,
+                                        mockLastStory: 'The Crystal Caves',
+                                        mockEmoji: '👧🏽'
+                                    },
+                                    {
+                                        id: 'default-sam',
+                                        name: "Sam's Sci-Fi Series",
+                                        character_id: mappedChars.find(c => c.name.toLowerCase() === 'sam')?.id || 'default-char-sam',
+                                        theme_id: 'space',
+                                        isDefault: true,
+                                        mockCount: 1,
+                                        mockLastStory: 'Mars Rover Rescue',
+                                        mockEmoji: '👦🏻'
+                                    }
+                                ];
+                                setTracks(initialTracks);
+                                localStorage.setItem(`kintales_tracks_${session.user.id}`, JSON.stringify(initialTracks));
+                            }
+                        }
                     } catch (err) {
                         console.error("Error loading data:", err);
                     } finally {
@@ -359,6 +410,78 @@
                 setHeroTab('gallery');
             };
 
+            const handleCreateTrack = async () => {
+                if (!newTrackName || !newTrackHeroId || !session?.user) return;
+                setIsGenerating(true);
+
+                try {
+                    const trackPayload = {
+                        user_id: session.user.id,
+                        character_id: newTrackHeroId,
+                        name: newTrackName,
+                        theme_id: newTrackThemeId || 'treasure'
+                    };
+
+                    let newTrack;
+                    try {
+                        const { data, error } = await supabase.from('adventure_tracks').insert(trackPayload).select().single();
+                        if (error) throw error;
+                        newTrack = data;
+                    } catch (supabaseErr) {
+                        console.warn("Failed to save track in Supabase (falling back to local):", supabaseErr);
+                        newTrack = {
+                            id: 'local-' + Math.random().toString(36).substring(2, 9),
+                            created_at: new Date().toISOString(),
+                            user_id: session.user.id,
+                            character_id: newTrackHeroId,
+                            name: newTrackName,
+                            theme_id: newTrackThemeId || 'treasure'
+                        };
+
+                        // Save in LocalStorage
+                        const localTracksStr = localStorage.getItem(`kintales_tracks_${session.user.id}`);
+                        let localTracks = localTracksStr ? JSON.parse(localTracksStr) : [];
+                        localTracks = [newTrack, ...localTracks];
+                        localStorage.setItem(`kintales_tracks_${session.user.id}`, JSON.stringify(localTracks));
+                    }
+
+                    setTracks(prev => [newTrack, ...prev]);
+                    setIsCreatingTrack(false);
+                    setNewTrackName('');
+                    setNewTrackHeroId('');
+                    setNewTrackThemeId('');
+                } catch (err) {
+                    console.error("Error creating track:", err);
+                    alert("Failed to create track: " + err.message);
+                } finally {
+                    setIsGenerating(false);
+                }
+            };
+
+            const handleDeleteTrack = async (trackId) => {
+                if (!confirm("Are you sure you want to delete this Adventure Track? Your saved stories will not be deleted.")) return;
+                
+                try {
+                    if (!trackId.startsWith('default-') && !trackId.startsWith('local-')) {
+                        const { error } = await supabase.from('adventure_tracks').delete().eq('id', trackId);
+                        if (error) throw error;
+                    } else {
+                        // Delete from localStorage
+                        const localTracksStr = localStorage.getItem(`kintales_tracks_${session.user.id}`);
+                        if (localTracksStr) {
+                            let localTracks = JSON.parse(localTracksStr);
+                            localTracks = localTracks.filter(t => t.id !== trackId);
+                            localStorage.setItem(`kintales_tracks_${session.user.id}`, JSON.stringify(localTracks));
+                        }
+                    }
+
+                    setTracks(prev => prev.filter(t => t.id !== trackId));
+                } catch (err) {
+                    console.error("Error deleting track:", err);
+                    alert("Failed to delete track: " + err.message);
+                }
+            };
+
             const handleForgeStory = async () => {
                 if (!selectedHero || !selectedTheme || !session?.user) return;
                 setIsGenerating(true);
@@ -368,26 +491,65 @@
                     const themeObj = themes.find(t => t.id === selectedTheme);
                     const title = `${hero.name}'s ${themeObj.name} Adventure`;
 
-                    const { data, error } = await supabase.from('stories').insert({
-                        user_id: session.user.id,
-                        character_id: hero.id,
-                        title: title,
-                        theme_id: themeObj.id
-                    }).select('*, character:characters(*)').single();
+                    // Attempt to insert with track_id
+                    let storyResult;
+                    try {
+                        const insertPayload = {
+                            user_id: session.user.id,
+                            character_id: hero.id,
+                            title: title,
+                            theme_id: themeObj.id
+                        };
+                        
+                        if (selectedTrackId && !selectedTrackId.startsWith('default-') && !selectedTrackId.startsWith('local-')) {
+                            insertPayload.track_id = selectedTrackId;
+                        }
 
-                    if (error) throw error;
+                        const { data, error } = await supabase.from('stories').insert(insertPayload).select('*, character:characters(*)').single();
+                        if (error) throw error;
+                        storyResult = data;
+                    } catch (supabaseErr) {
+                        console.warn("Inserting story with track_id failed (likely database column does not exist yet). Retrying without track_id:", supabaseErr);
+                        // Retry inserting without track_id
+                        const { data, error } = await supabase.from('stories').insert({
+                            user_id: session.user.id,
+                            character_id: hero.id,
+                            title: title,
+                            theme_id: themeObj.id
+                        }).select('*, character:characters(*)').single();
+
+                        if (error) throw error;
+                        storyResult = data;
+
+                        // Save the story-to-track association in localStorage fallback if a track was selected
+                        if (selectedTrackId) {
+                            const localAssocStr = localStorage.getItem(`kintales_story_tracks_${session.user.id}`) || '{}';
+                            const localAssocs = JSON.parse(localAssocStr);
+                            localAssocs[storyResult.id] = selectedTrackId;
+                            localStorage.setItem(`kintales_story_tracks_${session.user.id}`, JSON.stringify(localAssocs));
+                        }
+                    }
+
+                    // Save local association for default/local tracks
+                    if (selectedTrackId && (selectedTrackId.startsWith('default-') || selectedTrackId.startsWith('local-'))) {
+                        const localAssocStr = localStorage.getItem(`kintales_story_tracks_${session.user.id}`) || '{}';
+                        const localAssocs = JSON.parse(localAssocStr);
+                        localAssocs[storyResult.id] = selectedTrackId;
+                        localStorage.setItem(`kintales_story_tracks_${session.user.id}`, JSON.stringify(localAssocs));
+                    }
 
                     const newStory = {
-                        ...data,
-                        hero: { ...data.character, image: data.character?.emoji_icon || '✨' },
+                        ...storyResult,
+                        hero: { ...storyResult.character, image: storyResult.character?.emoji_icon || '✨' },
                         theme: themeObj,
-                        date: new Date(data.created_at).toLocaleDateString()
+                        date: new Date(storyResult.created_at).toLocaleDateString()
                     };
 
                     setStories([newStory, ...stories]);
                     setCurrentView('archive');
                     setSelectedHero(null);
                     setSelectedTheme(null);
+                    setSelectedTrackId('');
                 } catch (err) {
                     console.error("Error forging story:", err);
                     alert("Failed to forge story: " + err.message);
@@ -573,32 +735,114 @@
 
                         {/* Adventure Tracks */}
                         <div className="col-span-1 md:col-span-2 lg:col-span-1 flex flex-col gap-4">
-                            <h3 className="text-xl font-bold">Active Adventure Tracks</h3>
-                            <div className={`p-4 rounded-xl border flex items-center justify-between cursor-pointer hover:bg-black/5
-                ${theme.card}`}>
-                                <div className="flex items-center gap-3">
-                                    <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center text-xl border">
-                                        👧🏽</div>
+                            <div className="flex justify-between items-center">
+                                <h3 className="text-xl font-bold">Active Adventure Tracks</h3>
+                                <button onClick={() => {
+                                    setIsCreatingTrack(true);
+                                    if (characters.length > 0) setNewTrackHeroId(characters[0].id);
+                                    if (themes.length > 0) setNewTrackThemeId(themes[0].id);
+                                }}
+                                    className={`p-1.5 rounded-full hover:bg-black/5 ${theme.accentText}`}
+                                    title="Create New Track"
+                                >
+                                    <UserPlus className="w-5 h-5" />
+                                </button>
+                            </div>
+
+                            {isCreatingTrack && (
+                                <div className={`p-4 rounded-xl border space-y-3 ${theme.card}`}>
+                                    <h4 className="font-bold text-sm">Create Adventure Track</h4>
                                     <div>
-                                        <h4 className="font-bold">Maya's Missions</h4>
-                                        <p className={`text-xs ${theme.textMuted}`}>3 Stories • Last: The Crystal Caves</p>
+                                        <label className={`text-[10px] font-bold uppercase tracking-wider ${theme.textMuted}`}>Track Name</label>
+                                        <input type="text" value={newTrackName} onChange={(e) => setNewTrackName(e.target.value)}
+                                            placeholder="e.g. Maya's Magic Missions"
+                                            className={`w-full mt-1 p-2 text-sm rounded-lg border bg-transparent focus:outline-none focus:ring-2 focus:ring-cyan-500 ${isNightMode ? 'border-slate-700 text-slate-100' : 'border-amber-200 text-slate-800'}`}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className={`text-[10px] font-bold uppercase tracking-wider ${theme.textMuted}`}>Main Hero</label>
+                                        <select value={newTrackHeroId} onChange={(e) => setNewTrackHeroId(e.target.value)}
+                                            className={`w-full mt-1 p-2 text-sm rounded-lg border bg-transparent focus:outline-none ${isNightMode ? 'border-slate-700 bg-slate-800 text-slate-100' : 'border-amber-200 bg-white text-slate-800'}`}
+                                        >
+                                            {characters.map(c => (
+                                                <option key={c.id} value={c.id} className={isNightMode ? 'bg-slate-800 text-slate-100' : 'bg-white text-slate-800'}>{c.image} {c.name}</option>
+                                            ))}
+                                            {characters.length === 0 && <option value="">No characters found</option>}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className={`text-[10px] font-bold uppercase tracking-wider ${theme.textMuted}`}>Default Theme</label>
+                                        <select value={newTrackThemeId} onChange={(e) => setNewTrackThemeId(e.target.value)}
+                                            className={`w-full mt-1 p-2 text-sm rounded-lg border bg-transparent focus:outline-none ${isNightMode ? 'border-slate-700 bg-slate-800 text-slate-100' : 'border-amber-200 bg-white text-slate-800'}`}
+                                        >
+                                            {themes.map(t => (
+                                                <option key={t.id} value={t.id} className={isNightMode ? 'bg-slate-800 text-slate-100' : 'bg-white text-slate-800'}>{t.icon} {t.name}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div className="flex gap-2 pt-1 text-xs">
+                                        <button onClick={() => setIsCreatingTrack(false)}
+                                            className={`flex-1 py-2 rounded-lg font-bold border ${isNightMode ? 'border-slate-700 hover:bg-slate-800' : 'border-amber-200 hover:bg-amber-100'}`}
+                                        >
+                                            Cancel
+                                        </button>
+                                        <button onClick={handleCreateTrack} disabled={!newTrackName || !newTrackHeroId}
+                                            className={`flex-[2] py-2 rounded-lg font-bold text-white transition-all disabled:opacity-50 ${theme.accent}`}
+                                        >
+                                            Create Track
+                                        </button>
                                     </div>
                                 </div>
-                                <PlayCircle className={theme.accentText} />
-                            </div>
-                            <div className={`p-4 rounded-xl border flex items-center justify-between cursor-pointer hover:bg-black/5
-                ${theme.card}`}>
-                                <div className="flex items-center gap-3">
-                                    <div
-                                        className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center text-xl border">
-                                        👦🏻</div>
-                                    <div>
-                                        <h4 className="font-bold">Sam's Sci-Fi Series</h4>
-                                        <p className={`text-xs ${theme.textMuted}`}>1 Story • Last: Mars Rover Rescue</p>
+                            )}
+
+                            {tracks.map(track => {
+                                // Calculate dynamic counts
+                                const localAssocStr = localStorage.getItem(`kintales_story_tracks_${session.user.id}`) || '{}';
+                                const localAssocs = JSON.parse(localAssocStr);
+                                const trackStories = stories.filter(s => s.track_id === track.id || localAssocs[s.id] === track.id);
+                                const totalCount = trackStories.length + (track.mockCount || 0);
+
+                                let lastStoryTitle = track.mockLastStory || 'No stories yet';
+                                if (trackStories.length > 0) {
+                                    lastStoryTitle = trackStories[0].title;
+                                }
+
+                                const char = characters.find(c => c.id === track.character_id);
+                                const charEmoji = char ? (char.image || '🌟') : (track.mockEmoji || '🌟');
+
+                                return (
+                                    <div key={track.id} onClick={() => {
+                                        setSelectedHero(track.character_id);
+                                        setSelectedTheme(track.theme_id);
+                                        setSelectedTrackId(track.id);
+                                        setCurrentView('forge');
+                                    }}
+                                        className={`p-4 rounded-xl border flex items-center justify-between cursor-pointer hover:bg-black/5 group transition-all ${theme.card}`}
+                                    >
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center text-xl border">
+                                                {charEmoji}
+                                            </div>
+                                            <div>
+                                                <h4 className="font-bold">{track.name}</h4>
+                                                <p className={`text-xs ${theme.textMuted}`}>{totalCount} {totalCount === 1 ? 'Story' : 'Stories'} • Last: {lastStoryTitle}</p>
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <button onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleDeleteTrack(track.id);
+                                            }}
+                                                className="p-1 text-red-500 hover:bg-red-500/10 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                                                title="Delete Track"
+                                            >
+                                                <X className="w-4 h-4" />
+                                            </button>
+                                            <PlayCircle className={theme.accentText} />
+                                        </div>
                                     </div>
-                                </div>
-                                <PlayCircle className={theme.accentText} />
-                            </div>
+                                );
+                            })}
                         </div>
                     </div>
                 </div>
@@ -925,6 +1169,24 @@
                                         Graphic Novel (Teens)
                                     </button>
                                 </div>
+                            </div>
+
+                            {/* Adventure Track Selection */}
+                            <div className={`p-6 rounded-2xl border ${theme.card}`}>
+                                <h3 className="font-bold mb-4 flex items-center gap-2">
+                                    <BookOpen className="w-5 h-5" /> Adventure Track (Optional)
+                                </h3>
+                                <select value={selectedTrackId} onChange={(e) => setSelectedTrackId(e.target.value)}
+                                    className={`w-full p-3 rounded-lg border bg-transparent focus:outline-none focus:ring-2 focus:ring-cyan-500 ${isNightMode ? 'border-slate-700 bg-slate-800 text-slate-100' : 'border-amber-200 bg-white text-slate-800'}`}
+                                >
+                                    <option value="" className={isNightMode ? 'bg-slate-800 text-slate-100' : 'bg-white text-slate-800'}>Standalone Adventure (No Track)</option>
+                                    {tracks.map(t => (
+                                        <option key={t.id} value={t.id} className={isNightMode ? 'bg-slate-800 text-slate-100' : 'bg-white text-slate-800'}>{t.name}</option>
+                                    ))}
+                                </select>
+                                <p className={`text-xs mt-2 ${theme.textMuted}`}>
+                                    Add this story to an ongoing series to keep your character's journey organized!
+                                </p>
                             </div>
                         </div>
                     </div>
