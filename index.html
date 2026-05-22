@@ -6,8 +6,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>KinTales</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Runtime API key config: set your Gemini key in config.js -->
-    <script src="config.js"></script>
+    <!-- Runtime API key config: copy config.example.js → config.js, fill in your key, upload both files to Hostinger -->
+    <script>
+        // Dynamically load config.js so the app doesn't crash if it's missing on the web host.
+        // If missing, the avatar generator will prompt the user to add the key instead of breaking.
+        window.KINTALES_CONFIG = window.KINTALES_CONFIG || {};
+    </script>
+    <script src="config.js" onerror="console.warn('KinTales: config.js not found — avatar generation will be disabled. Upload config.js to your web host. See config.example.js for instructions.')"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script type="importmap">
     {
