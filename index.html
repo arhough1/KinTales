@@ -211,10 +211,14 @@
                         const localQuirks = JSON.parse(localQuirksStr);
                         const localAvatarsStr = localStorage.getItem(`kintales_hero_avatars_${session.user.id}`) || '{}';
                         const localAvatars = JSON.parse(localAvatarsStr);
+
                         const mappedChars = charsResponse.data.map(c => ({
                             ...c,
                             age: c.age || localAges[c.id] || '',
                             quirk: c.quirk || localQuirks[c.id] || '',
+                            visual_description: c.visual_description || '',
+                            generated_prompt: c.generated_prompt || '',
+                            archetype_list: c.archetype_list || [],
                             avatar: localAvatars[c.id] || '',
                             image: localAvatars[c.id] || c.emoji_icon || '✨',
                             images: c.image_paths || []
@@ -293,6 +297,10 @@
             const [uploadedImages, setUploadedImages] = useState([]);
             const [isAnalyzingImage, setIsAnalyzingImage] = useState(false);
             const [archetypeMode, setArchetypeMode] = useState('standard'); // 'standard' or 'vision'
+            const [visualDescription, setVisualDescription] = useState('');
+            const [generatedPrompt, setGeneratedPrompt] = useState('');
+            const [archetypeList, setArchetypeList] = useState([]);
+            const [archetypeIndex, setArchetypeIndex] = useState(0);
             const fileInputRef = React.useRef(null);
 
             // Avatar Generation State
@@ -332,19 +340,57 @@
                 }, 1200);
 
                 try {
+                    let finalVisualDescription = visualDescription;
+                    if (!finalVisualDescription && uploadedImages && uploadedImages.length > 0) {
+                        try {
+                            setAvatarStatusMsg('🔍 Analyzing reference photos...');
+                            const result = await get_visual_description(uploadedImages, 'gemini-flash-latest', geminiKey);
+                            if (result) {
+                                finalVisualDescription = result.visual_description || '';
+                                setVisualDescription(finalVisualDescription);
+                            }
+                        } catch (e) {
+                            console.warn("Failed to analyze image:", e);
+                        }
+                    }
+                    
+                    if (uploadedImages && uploadedImages.length > 0) {
+                        setAvatarStatusMsg('🎨 Splashing watercolors...');
+                    }
+
                     const prompt = [
-                        `A highly detailed cartoonish character portrait avatar of a cute cheerful child character named ${newHeroName},`,
+                        `A highly detailed cartoonish portrait avatar of a cute cheerful ${finalVisualDescription ? 'character' : 'child character'} named ${newHeroName},`,
                         newHeroAge ? `${newHeroAge} years old,` : '',
                         newHeroRole ? `who is a ${newHeroRole}.` : '',
                         newHeroQuirk ? `Character personality: ${newHeroQuirk}.` : '',
+                        finalVisualDescription ? `Visual appearance: ${finalVisualDescription}` : '',
                         'Pixar Disney 3D animated style, vibrant saturated colors, warm friendly expression,',
                         'clean solid pastel background, soft round studio lighting, perfect square avatar portrait,',
                         'high quality digital art, ultra detailed, professional character design.'
                     ].filter(Boolean).join(' ');
+                    
+                    setGeneratedPrompt(prompt);
 
-                    // Use Gemini Imagen 3 for image generation
+                    // Capture info and trigger download
+                    try {
+                        const captureText = `Hero Name: ${newHeroName}\nAge: ${newHeroAge || 'N/A'}\nRole: ${newHeroRole || 'N/A'}\nQuirk: ${newHeroQuirk || 'N/A'}\nVisual Description (extracted from uploaded image): ${finalVisualDescription || 'None'}\n\nGenerated Prompt:\n${prompt}`;
+                        const blob = new Blob([captureText], { type: 'text/plain' });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                        a.href = url;
+                        a.download = `Portrait_Info_${newHeroName.replace(/[^a-z0-9]/gi, '_')}_${timestamp}.txt`;
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        URL.revokeObjectURL(url);
+                    } catch(err) {
+                        console.error('Failed to download prompt info:', err);
+                    }
+
+                    // Use Imagen 4.0 for image generation
                     const response = await fetch(
-                        `https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0-generate-002:predict?key=${geminiKey}`,
+                        `https://generativelanguage.googleapis.com/v1beta/models/imagen-4.0-generate-001:predict?key=${geminiKey}`,
                         {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
@@ -391,39 +437,101 @@
                 setNewHeroAge(hero.age || '');
                 setNewHeroQuirk(hero.quirk || '');
                 setUploadedImages(hero.images || []); // Load existing images
-                setArchetypeMode((hero.images && hero.images.length > 0) ? 'vision' : 'standard');
+                setVisualDescription(hero.visual_description || '');
+                setGeneratedPrompt(hero.generated_prompt || '');
+                setArchetypeList(hero.archetype_list || []);
+                setArchetypeIndex(0);
                 setNewHeroAvatar(hero.avatar || '');
                 setHeroTab('training');
             };
 
-            const handleSuggestArchetype = () => {
+            const get_visual_description = async (pictures, model, apiKey) => {
+                if (!pictures || pictures.length === 0) return null;
+                
+                try {
+                    const imgRes = await fetch(pictures[0]);
+                    const imgBlob = await imgRes.blob();
+                    const base64Data = await new Promise(resolve => {
+                        const reader = new FileReader();
+                        reader.onloadend = () => resolve(reader.result.split(',')[1]);
+                        reader.readAsDataURL(imgBlob);
+                    });
+
+                    const systemInstruction = "Task: Generate a highly detailed visual description from the pictures. Make sure to capture:\n1) What type of character the picture is mainly about to include: Type: human, animal, if animal what kind of animal is it. If human: try to capture age: child, pre-teen, teen, old. If pictures seem to conflict, ignore this trait. If human: capture skin color. If animal: color, any color pattern, if animal has fur is it fluffy, long hair, etc.\n2) any quirky or unusual trails such as snaggle tooth, eye orientation (crossed, lazy, drifting, etc), different color of eyes, etc.\n3) hair or fur style (do the pictures show the subject to have spike or frosted tips in thier hair/fur/mane/etc)\n4) Capture detailed information about eyes, ears, hair/fur/mane/etc, body type: (slim, overweight, athletic, etc, without negative connotations).\n5) Capture anything else relevant.\n\nAlso create a list of 5 fun, personal, entertaining, age appropriate archetypes based on the visual description.\n\nReturn EXACTLY a JSON object with this schema: { \"visual_description\": \"...\", \"archetypes\": [\"The ...\", \"The ...\"] } without markdown formatting.";
+
+                    const visionRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            contents: [{
+                                parts: [
+                                    { text: systemInstruction },
+                                    { inlineData: { mimeType: imgBlob.type, data: base64Data } }
+                                ]
+                            }],
+                            generationConfig: {
+                                responseMimeType: "application/json"
+                            }
+                        })
+                    });
+                    
+                    if (visionRes.ok) {
+                        const visionData = await visionRes.json();
+                        const text = visionData.candidates?.[0]?.content?.parts?.[0]?.text;
+                        if (text) {
+                            return JSON.parse(text);
+                        }
+                    }
+                } catch (e) {
+                    console.error("Failed get_visual_description:", e);
+                }
+                return null;
+            };
+
+            const handleGenerateArchetypes = async () => {
                 if (isAnalyzingImage) return;
 
-                if (archetypeMode === 'vision' && uploadedImages.length > 0) {
-                    // Simulate Photo Analysis
+                if (uploadedImages.length > 0) {
+                    const geminiKey = (window.KINTALES_CONFIG || {}).GEMINI_API_KEY || '';
+                    if (!geminiKey || geminiKey === 'YOUR_GEMINI_API_KEY_HERE') {
+                        alert('Please add your Gemini API key to config.js first.');
+                        return;
+                    }
                     setIsAnalyzingImage(true);
-                    setTimeout(() => {
-                        const visionSuggestions = [
-                            "The Fluffy Guardian", "The Bright-Eyed Scholar", "The Mischievous Sprite",
-                            "The Agile Acrobat", "The Dashing Rogue", "The Gentle Giant",
-                            "The Goggled Aviator", "The Shadowy Ninja", "The Golden Retriever of Truth"
+                    const result = await get_visual_description(uploadedImages, 'gemini-flash-latest', geminiKey);
+                    if (result) {
+                        setVisualDescription(result.visual_description || '');
+                        
+                        // Merge standard list
+                        const standardSuggestions = [
+                            "The Curious Inventor", "The Brave Explorer", "The Loyal Companion",
+                            "The Fearless Scout", "The Wise Wizard", "The Noble Knight",
+                            "The Swift Runner", "The Master Detective", "The Star Captain",
+                            "The Secret Agent", "The Magical Guardian", "The Treasure Hunter",
+                            "The Dream Weaver", "The Shadow Walker", "The Cosmic Voyager"
                         ];
-                        const random = visionSuggestions[Math.floor(Math.random() * visionSuggestions.length)];
-                        setNewHeroRole(random);
-                        setIsAnalyzingImage(false);
-                    }, 1500);
-                } else {
-                    // Use Standard List
-                    const suggestions = [
-                        "The Curious Inventor", "The Brave Explorer", "The Loyal Companion",
-                        "The Fearless Scout", "The Wise Wizard", "The Noble Knight",
-                        "The Swift Runner", "The Master Detective", "The Star Captain",
-                        "The Secret Agent", "The Magical Guardian", "The Treasure Hunter",
-                        "The Dream Weaver", "The Shadow Walker", "The Cosmic Voyager"
-                    ];
-                    const random = suggestions[Math.floor(Math.random() * suggestions.length)];
-                    setNewHeroRole(random);
+                        const newArchList = [...(result.archetypes || []), ...standardSuggestions];
+                        setArchetypeList(newArchList);
+                        setArchetypeIndex(0);
+                        if (result.archetypes && result.archetypes.length > 0) {
+                            setNewHeroRole(result.archetypes[0]);
+                        }
+                    }
+                    setIsAnalyzingImage(false);
                 }
+            };
+
+            const cycleArchetype = () => {
+                const list = archetypeList.length > 0 ? archetypeList : [
+                    "The Curious Inventor", "The Brave Explorer", "The Loyal Companion",
+                    "The Fearless Scout", "The Wise Wizard", "The Noble Knight",
+                    "The Swift Runner", "The Master Detective", "The Star Captain",
+                    "The Secret Agent", "The Magical Guardian", "The Treasure Hunter",
+                    "The Dream Weaver", "The Shadow Walker", "The Cosmic Voyager"
+                ];
+                const nextIdx = (archetypeIndex + 1) % list.length;
+                setArchetypeIndex(nextIdx);
+                setNewHeroRole(list[nextIdx]);
             };
 
             const handleImageUpload = async (e) => {
@@ -483,7 +591,10 @@
                         emoji_icon: uploadedImages.length > 0 ? '✨' : '🌟',
                         image_paths: uploadedImages,
                         age: newHeroAge || '',
-                        quirk: newHeroQuirk || ''
+                        quirk: newHeroQuirk || '',
+                        visual_description: visualDescription || '',
+                        generated_prompt: generatedPrompt || '',
+                        archetype_list: archetypeList || []
                     };
 
                     let data, error;
@@ -502,7 +613,7 @@
                         const isMissingColumn = supabaseErr.message?.includes('age') || supabaseErr.message?.includes('quirk') || supabaseErr.code === '42703';
                         if (isMissingColumn) {
                             console.warn("Supabase characters table missing columns. Falling back to LocalStorage.");
-                            const { age, quirk, ...strippedHeroData } = heroData;
+                            const { age, quirk, visual_description, generated_prompt, archetype_list, ...strippedHeroData } = heroData;
                             if (editingHeroId) {
                                 const res = await supabase.from('characters').update(strippedHeroData).eq('id', editingHeroId).select().single();
                                 data = res.data;
@@ -514,47 +625,41 @@
                             }
                             if (error) throw error;
 
-                            // Save age and quirk to LocalStorage fallback
-                            const localAgesStr = localStorage.getItem(`kintales_hero_ages_${session.user.id}`) || '{}';
-                            const localAges = JSON.parse(localAgesStr);
-                            localAges[data.id] = newHeroAge;
-                            localStorage.setItem(`kintales_hero_ages_${session.user.id}`, JSON.stringify(localAges));
-
-                            const localQuirksStr = localStorage.getItem(`kintales_hero_quirks_${session.user.id}`) || '{}';
-                            const localQuirks = JSON.parse(localQuirksStr);
-                            localQuirks[data.id] = newHeroQuirk;
-                            localStorage.setItem(`kintales_hero_quirks_${session.user.id}`, JSON.stringify(localQuirks));
-
                             data.age = newHeroAge;
                             data.quirk = newHeroQuirk;
+                            data.visual_description = visualDescription;
+                            data.generated_prompt = generatedPrompt;
+                            data.archetype_list = archetypeList;
                         } else {
                             throw supabaseErr;
                         }
                     }
 
-                    // Save age, quirk and avatar to LocalStorage for offline persistence / consistent cache state
-                    const localAgesStr = localStorage.getItem(`kintales_hero_ages_${session.user.id}`) || '{}';
-                    const localAges = JSON.parse(localAgesStr);
-                    localAges[data.id] = newHeroAge;
-                    localStorage.setItem(`kintales_hero_ages_${session.user.id}`, JSON.stringify(localAges));
+                    // Save to LocalStorage for offline persistence / consistent cache state
+                    const saveToLocal = (key, value) => {
+                        const str = localStorage.getItem(key) || '{}';
+                        const obj = JSON.parse(str);
+                        obj[data.id] = value;
+                        localStorage.setItem(key, JSON.stringify(obj));
+                    };
 
-                    const localQuirksStr = localStorage.getItem(`kintales_hero_quirks_${session.user.id}`) || '{}';
-                    const localQuirks = JSON.parse(localQuirksStr);
-                    localQuirks[data.id] = newHeroQuirk;
-                    localStorage.setItem(`kintales_hero_quirks_${session.user.id}`, JSON.stringify(localQuirks));
+                    saveToLocal(`kintales_hero_ages_${session.user.id}`, newHeroAge);
+                    saveToLocal(`kintales_hero_quirks_${session.user.id}`, newHeroQuirk);
+                    saveToLocal(`kintales_hero_visdesc_${session.user.id}`, visualDescription);
+                    saveToLocal(`kintales_hero_genprompt_${session.user.id}`, generatedPrompt);
+                    saveToLocal(`kintales_hero_archlist_${session.user.id}`, archetypeList);
 
-                    // Persist avatar (base64 data URL) in localStorage
                     if (newHeroAvatar) {
-                        const localAvatarsStr = localStorage.getItem(`kintales_hero_avatars_${session.user.id}`) || '{}';
-                        const localAvatars = JSON.parse(localAvatarsStr);
-                        localAvatars[data.id] = newHeroAvatar;
-                        localStorage.setItem(`kintales_hero_avatars_${session.user.id}`, JSON.stringify(localAvatars));
+                        saveToLocal(`kintales_hero_avatars_${session.user.id}`, newHeroAvatar);
                     }
 
                     const mappedSavedHero = {
                         ...data,
                         age: newHeroAge,
                         quirk: newHeroQuirk,
+                        visual_description: visualDescription,
+                        generated_prompt: generatedPrompt,
+                        archetype_list: archetypeList,
                         avatar: newHeroAvatar || '',
                         image: newHeroAvatar || data.emoji_icon || '✨',
                         images: data.image_paths || []
@@ -574,6 +679,10 @@
                     setNewHeroAvatar('');
                     setUploadedImages([]);
                     setArchetypeMode('standard');
+                    setVisualDescription('');
+                    setGeneratedPrompt('');
+                    setArchetypeList([]);
+                    setArchetypeIndex(0);
                     setHeroTab('gallery');
                 } catch (err) {
                     console.error("Error saving hero:", err);
@@ -1202,43 +1311,30 @@
                                                 <label className={`text-xs font-bold uppercase tracking-wider ${theme.textMuted}`}>Suggested
                                                     Archetype</label>
 
-                                                {/* Archetype Generator Mode Toggle */}
-                                                <div className="flex bg-black/5 rounded-lg p-1">
-                                                    <button onClick={() => setArchetypeMode('standard')}
-                                                        className={`text-[10px] font-bold px-2 py-1 rounded-md transition-colors
-                                    ${archetypeMode === 'standard' ? (isNightMode ? 'bg-cyan-600 text-white' :
-                                                                'bg-rose-500 text-white') : 'text-slate-500'}`}
-                                                    >
-                                                        Standard
-                                                    </button>
-                                                    <button onClick={() => setArchetypeMode('vision')}
-                                                        disabled={uploadedImages.length === 0}
-                                                        className={`text-[10px] font-bold px-2 py-1 rounded-md transition-colors
-                                    ${archetypeMode === 'vision' ? (isNightMode ? 'bg-cyan-600 text-white' :
-                                                                'bg-rose-500 text-white') : 'text-slate-500'} ${uploadedImages.length === 0 ?
-                                                                    'opacity-30 cursor-not-allowed' : ''}`}
-                                                        title={uploadedImages.length === 0 ? "Upload photos to unlock Vision Analysis" :
-                                                            "Analyze Photos"}
-                                                    >
-                                                        Vision
-                                                    </button>
-                                                </div>
+                                                <button onClick={handleGenerateArchetypes}
+                                                    disabled={uploadedImages.length === 0 || isAnalyzingImage}
+                                                    className={`text-[10px] font-bold px-3 py-1 rounded-md transition-colors 
+                                                    ${isNightMode ? 'bg-cyan-600 text-white hover:bg-cyan-500' : 'bg-rose-500 text-white hover:bg-rose-400'} 
+                                                    ${(uploadedImages.length === 0 || isAnalyzingImage) ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                                    title={uploadedImages.length === 0 ? "Upload photos to generate archetypes" : "Generate custom archetypes from photos"}
+                                                >
+                                                    {isAnalyzingImage ? 'Generating...' : 'Generate'}
+                                                </button>
                                             </div>
 
                                             <div className={`p-3 rounded-lg border mt-1 flex justify-between items-center ${isNightMode
                                                 ? 'bg-slate-800 border-cyan-800' : 'bg-rose-50 border-rose-200'}`}>
-                                                <input type="text" value={isAnalyzingImage ? "Analyzing photos..." : newHeroRole}
+                                                <input type="text" value={isAnalyzingImage ? "Generating custom archetypes..." : newHeroRole}
                                                     onChange={(e) => setNewHeroRole(e.target.value)}
                                                     disabled={isAnalyzingImage}
-                                                    placeholder={archetypeMode === 'vision' ? "Awaiting visual cues..." : "The Curious " +
-                                                        "Inventor"}
+                                                    placeholder="The Curious Inventor"
                                                     className={`bg-transparent border-none focus:outline-none w-full font-bold
                             ${isAnalyzingImage ? 'opacity-50' : ''}`}
                                                 />
                                                 {isAnalyzingImage ? (
                                                     <Loader2 className="w-4 h-4 animate-spin text-cyan-500" />
                                                 ) : (
-                                                    <Wand2 onClick={handleSuggestArchetype}
+                                                    <Wand2 onClick={cycleArchetype}
                                                         className="w-4 h-4 cursor-pointer hover:rotate-180 transition-transform active:scale-90" />
                                                 )}
                                             </div>
